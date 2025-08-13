@@ -250,23 +250,29 @@ class Prolog(object):
                 break
 
             pretty_path = self._render_path(path)
-            print("%d: %s" % (pathid+1, pretty_path))
+            if pretty_path is not None:
+                print("%d: %s" % (pathid+1, pretty_path))
+            else:
+                print("%d: SKIPPED" % (pathid+1))
 
     def _render_path(self, path, colorized=False):
         renamed = []
 
         for component in path:
-            name = self.node_id_map_inv[component]
-            obj = self.node_objs[name]
+            if component in self.node_id_map_inv.keys():
+                name = self.node_id_map_inv[component]
+                obj = self.node_objs[name]
 
-            if colorized:
-                # TODO: make the coloring be controlled by a lambda
-                if obj.trusted:
-                    renamed += ["\x1b[32m%s (T)\x1b[0m" % name]
+                if colorized:
+                    # TODO: make the coloring be controlled by a lambda
+                    if obj.trusted:
+                        renamed += ["\x1b[32m%s (T)\x1b[0m" % name]
+                    else:
+                        renamed += ["\x1b[31m%s (U)\x1b[0m" % name]
                 else:
-                    renamed += ["\x1b[31m%s (U)\x1b[0m" % name]
+                    renamed += [name]
             else:
-                renamed += [name]
+                return None
 
         return " -> ".join(renamed)
 
