@@ -402,6 +402,16 @@ class SEPolicyInst(object):
             # TODO: properly handle BPF
             elif teclass in ["bpf"]:
                 node = SubjectNode(Cred())
+            #my patch for kernel lockdown (?) and io_uring
+            elif teclass in ["lockdown", "io_uring"]:
+                node = SubjectNode(Cred())
+            #my patch for keystore2
+            elif teclass in ["keystore2", "keystore2_key"]:
+                node = IPCNode(teclass)
+            #my patch for perf and memprotect
+            elif teclass in ["perf_event", "memprotect"]:   
+                node = SubjectNode(Cred())
+
 
         if node is None:
             raise ValueError("Unhandled object type %s" % teclass)
@@ -555,7 +565,14 @@ class SEPolicyInst(object):
 
                         # We may have already caught this during the file mapping, but that's why
                         # we're dealing with sets
+
                         for c in self.expand_attribute(child):
+                            #print("C: ", c, " child: ", child, " subject_name: ", subject_name)
+                            #print("Self.subjects.keys(): ", self.subjects.keys())
+                            #print("Print expanded attributes: ", self.expand_attribute(child))
+                            if c not in self.subjects:
+                                log.warning("Dyntransition target %s from %s not instantiated (not in subjects)", c, subject_name)
+                                continue
                             child_subject = self.subjects[c]
                             subject.children |= set([child_subject])
                             child_subject.parents |= set([subject])
@@ -1749,6 +1766,9 @@ Groups:\t%s
                             continue
                         # TODO: Android 9.0
                         elif edge["teclass"] in ["cap_userns", "cap2_userns"]:
+                            continue
+                        #my patch for lockdown
+                        elif edge["teclass"] in ["lockdown", "perf_event", "io_uring", "memprotect"]:
                             continue
                         else:
                             raise ValueError("Ignoring MAC edge <%s> -[%s]-> <%s>" % (subject_name, edge["teclass"], obj_name))
