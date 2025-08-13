@@ -10,6 +10,7 @@ import pickle
 import copy
 from fnmatch import fnmatch
 from subprocess import Popen
+import subprocess
 
 from config import *
 from android.property import AndroidPropertyList
@@ -44,6 +45,12 @@ TARGET_FILESYSTEMS = [
         "type": "ext4",
         "required": False,
     },
+    {
+        "name": "odm",
+        "pattern": "*odm*",
+        "type": "ext4",
+        "required": False,
+    },
 ]
 
 def path_to_firmware_name(filepath):
@@ -63,10 +70,17 @@ class FilesystemPolicy:
         self.mount_points = {}
 
     def add_file(self, path, policy_info):
+        print("add_file path: ", path)
         if path != "/" and path.endswith("/"):
             raise ValueError("Paths must be cannonicalized! %s" % path)
         if path in self.files:
-            raise ValueError("Cannot re-add existing path '%s' to policy" % path)
+            print("PROBLEMATIC PATH: ", path)
+            if "odm/" not in path:
+            #for file in self.files:
+            #    print(file)
+                raise ValueError("Cannot re-add existing path '%s' to policy" % path)
+            else:
+                print("Skipping error due to odm!")
 
         self.files[path] = policy_info
 
@@ -131,6 +145,7 @@ class FilesystemPolicy:
         }
 
     def mount(self, other_fs, path):
+        print("CALLING MOUNT FOR other_fs: ", other_fs, " path: ", path)
         if not isinstance(other_fs, FilesystemPolicy):
             raise ValueError("Expected to mount other FS policy")
 
@@ -146,7 +161,7 @@ class FilesystemPolicy:
             if fn == "":
                 self.files[path] = v
                 continue
-
+  
             self.add_file(os.path.join(path, fn), v)
 
         return self
@@ -362,6 +377,30 @@ class ASPExtractor:
         self.saved_files = {}
         self.job_id = job_id
 
+
+    def find_and_convert(self, directory):
+        original_dir = os.getcwd()
+        found_dir = ""
+        
+        for root, _, files in os.walk(directory):
+            if "super.img" in files:
+                os.chdir(root)
+                found_dir = root
+                print(f"Found super.img in {root}, changing directory and converting...")
+                
+                try:
+                    subprocess.run(["sudo", "simg2img", "super.img", "super.raw"], check=True)
+                    print("Conversion successful!")
+                except subprocess.CalledProcessError as e:
+                    print(f"Error during conversion: {e}")
+                
+                os.chdir(original_dir)
+                if found_dir != "":
+                    saved_super_raw = os.path.join(found_dir, "super.raw")
+                    print("SAVED PATH TO SUPER_RAW: ", saved_super_raw)
+                    subprocess.run(["sudo", "lpunpack", saved_super_raw, directory], check=True)
+                return  # Exit after the first match
+
     def save_file(self, source, path, overwrite=False):
         save_path = os.path.join(self.results_directory, path)
         mkdir_recursive(os.path.dirname(save_path))
@@ -392,8 +431,14 @@ class ASPExtractor:
         # Keep this local until we're done with it
         fs_policies = []
 
+        print("FILESYSTEMS I HAVE BEFORE MATCHING: ", filesystems)
+
         for fs in TARGET_FILESYSTEMS:
+            print("TARGET FS: ")
+            print(filesystems)
             match = list(filter(lambda x: fnmatch(x["name"], fs["pattern"]), filesystems))
+            print("MATCH:")
+            print(match)
 
             if "not_pattern" in fs:
                 match = list(filter(lambda x: not fnmatch(x["name"], fs["not_pattern"]), match))
@@ -415,6 +460,9 @@ class ASPExtractor:
             # Rebuild Android filesystem hierarchy, starting from the top
             log.info("Extracting %s security policy (%s)", fs["name"], match["name"])
             fspolicy = self._walk_filesystem(fs["name"], fs["type"], match["path"])
+            print("FULL fspolicy item list: ")
+            for item in fspolicy.files.items():
+                print(item)
             fs_policies += [fspolicy]
 
         # Determine how the firmware is organized
@@ -464,8 +512,18 @@ class ASPExtractor:
             combined_fs.fsname = "combined"
 
             combined_fs.add_mount_point("/vendor", "ext4", "/dev/block/bootdevice/by-name/vendor", ["rw"])
+        
+        if len(fs_policies) > 3:
+            print("ODM MUST HAVE BEEN FOUND")
+            log.info("Mounting /odm partition")
+            combined_fs = combined_fs.mount(fs_policies[3], "/odm")
+            combined_fs.fsname = "combined"
+
+            #combined_fs.add_mount_point("/odm", "ext4", "/dev/block/bootdevice/by-name/odm", ["rw"])
 
         # Extract out the policy files (from most preferential to least)
+        print("COMBINED FS :", combined_fs)
+        print("SEPOLICY FILES: ", SEPOLICY_FILES)
         for fn, p in combined_fs.files.items():
             filebase = os.path.basename(fn)
 
@@ -484,6 +542,7 @@ class ASPExtractor:
         # TODO: double check that we found a complete SEAndroid policy
 
         # extract out properties from the filesystems
+        print("MOUNT POINTS: ", combined_fs.mount_points)
         self._extract_properties(combined_fs)
         self._extract_init(combined_fs)
 
@@ -506,6 +565,7 @@ class ASPExtractor:
         self.asp.policy_files = self.saved_files
 
         return self.asp
+
 
     def _firmware_extract_task(self, filepath, skip=False):
         job_result_dir = os.path.join(os.environ['HOME'], 'atsh_tmp' + self.job_id)
@@ -535,9 +595,13 @@ class ASPExtractor:
             log.error("No filesystem result directory found. Possible extraction error")
             return []
 
+        #self.find_and_convert(firmware_extracted_path) #MY FUNC
+
         fs_prefix = "mnt_"
         mounted_filesystems = glob.glob(os.path.join(job_result_dir, fs_prefix + '*'))
         extracted_filesystems = list(directories(os.path.join(firmware_extracted_path)))
+        print("EXTRACTED FS PATHS:", extracted_filesystems)
+        print("FW_EXTRACTED_PATH:", firmware_extracted_path)
 
         filesystems = []
 
@@ -609,6 +673,7 @@ class ASPExtractor:
             self.save_file(v["original_path"], os.path.join("init", rc[1:]))
 
     def _walk_filesystem(self, fs_name, fs_type, toplevel_path):
+        print("FS_NAME: ")
         def handle_error(exp):
             if isinstance(exp, OSError):
                 if exp.errno == errno.EACCES:
@@ -616,6 +681,7 @@ class ASPExtractor:
                     sys.exit(1)
 
             raise
+
 
         fsp = FilesystemPolicy(fs_name, fs_type)
 
