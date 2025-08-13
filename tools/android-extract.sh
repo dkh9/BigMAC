@@ -72,7 +72,8 @@ UNSPARSE=$DEPPATH/combine_unsparse.sh
 SDAT2IMG=$DEPPATH/sdat2img/sdat2img.py
 SONYFLASH=$DEPPATH/flashtool/FlashToolConsole
 SONYELF=$DEPPATH/unpackelf/unpackelf
-IMGTOOL=$DEPPATH/imgtool/imgtool.ELF64
+#IMGTOOL=$DEPPATH/imjtool/imjtool.ELF64 
+IMGTOOL=$DEPPATH/mkbootimg/unpack_bootimg.py
 HTCRUUDEC=$DEPPATH/htcruu-decrypt3.6.5/RUU_Decrypt_Tool # rename libcurl.so to libcurl.so.4
 SPLITQSB=$DEPPATH/split_qsb.pl
 LESZB=$DEPPATH/szbtool/leszb # szb format for lenovo
@@ -233,16 +234,19 @@ handle_bootimg()
 	local name=`basename "$1"`
 	# local dir=`dirname $1`
 	# local extracted=`dirname $IMGTOOL`
-	
+
 	if [[ "$name" == "boot"* ]] || [[ "$name" == "recovery"* ]] || [[ "$name" == "hosd"* ]] ||
 [[ "$name" == "droidboot"* ]] || [[ "$name" == "fastboot"* ]] || [[ "$name" == "okrecovery"* ]] ||
 [[ "$name" == "BOOT"* ]] || [[ "$name" == "RECOVERY"* ]] ||
 [[ "$name" == *".recovery"*".bin" ]] || [[ "$name" == *".boot"*".bin" ]] ||
 [[ "$name" == *".factory"*".bin" ]] || [[ "$name" == "laf"*".bin" ]]; then
-                echo "Handling bootimg $1"
+                echo "Handling bootimg $1 with new tool!"
 
 		# NOTE: recovery, boot, factory, and laf bins are LG-specific
-		$IMGTOOL "$1" extract # saves extracted result to current active directory
+		echo "$(pwd)"
+		#$IMGTOOL "$1" extract # saves extracted result to current active directory
+		out_dir="$(pwd)/extracted/"
+		$IMGTOOL --boot_img "$1" --out $out_dir
 		cd extracted # need special handling of ramdisk when unpacking
 		local format=`file -b ramdisk | cut -d" " -f1`
 		# ramdisk may be gzip archive format, but may also be LZ4 archive format
@@ -273,6 +277,21 @@ handle_bootimg()
 			sudo cp -a extracted "$MY_FULL_DIR"/"$SUB_DIR"/"$name"
 		fi
 		rm -rf extracted	
+	
+	elif [[ "$name" == "super"*".img" ]]; then
+		raw_name="${name%.img}.raw"
+		simg2img $name $raw_name
+		before=$(ls -1)
+		lpunpack $raw_name .
+		after=$(ls -1)
+		new_files=$(comm -13 <(echo "$before" | sort) <(echo "$after" | sort))
+		echo "NEW FILES"
+		for file in $new_files; do
+    		echo "Processing: $file"
+    		process_file "$file"
+		done
+
+
 	else
 		echo "Skipping bootimg decode as no name match"
 		handle_binary "$1"
@@ -492,6 +511,7 @@ at_extract()
 
 	# Check for special files
 	handle_special "$filename"
+	#DKH: was debugging here
 
 	if [ "$format" == "data" ] || [ "$format" == "apollo" ] || [ "$format" == "FoxPro" ] || [ "$format" == "Mach-O" ] || 
 [ "$format" == "DOS/MBR" ] || [ "$format" == "PE32" ] || [ "$format" == "PE32+" ] || [ "$format" == "dBase" ] || [ "$format" == "MS" ] || 
@@ -750,6 +770,68 @@ handle_vfat()
 	AT_RES="good"
 }
 
+handle_f2fs() 
+{
+	echo "HANDLING F2FS"
+	local img="$1"
+	local ext=`basename "$img"`
+	local arch=""
+	local mnt_name="${MNT_TMP}_${ext}"
+	mkdir $DIR_TMP
+	mkdir $mnt_name
+	# Make a copy
+	cp "$img" $DIR_TMP/"$ext"
+	# NOTE: needs sudo or root permission
+	sudo mount -o ro,loop -t f2fs $DIR_TMP/"$ext" $mnt_name
+	# Find the boot.oat for RE odex
+	BOOT_OAT=""
+	BOOT_OAT_64=""
+	while read file
+	do
+		# Debug
+		#echo "DEBUG: boot.oat - $file"
+		arch=`file -b "$file" | cut -d" " -f2 | cut -d"-" -f1`
+		if [ "$arch" == "64" ]; then
+			BOOT_OAT_64="$file"
+		else
+			BOOT_OAT="$file"
+		fi
+	done < <(sudo find $mnt_name -name boot.oat -print)
+	AT_RES="good"
+
+}
+
+handle_erofs() 
+{
+	echo "HANDLING EROFS"
+	local img="$1"
+	local ext=`basename "$img"`
+	local arch=""
+	local mnt_name="${MNT_TMP}_${ext}"
+	mkdir $DIR_TMP
+	mkdir $mnt_name
+	# Make a copy
+	cp "$img" $DIR_TMP/"$ext"
+	# NOTE: needs sudo or root permission
+	sudo mount -o ro,loop -t erofs $DIR_TMP/"$ext" $mnt_name
+	# Find the boot.oat for RE odex
+	BOOT_OAT=""
+	BOOT_OAT_64=""
+	while read file
+	do
+		# Debug
+		#echo "DEBUG: boot.oat - $file"
+		arch=`file -b "$file" | cut -d" " -f2 | cut -d"-" -f1`
+		if [ "$arch" == "64" ]; then
+			BOOT_OAT_64="$file"
+		else
+			BOOT_OAT="$file"
+		fi
+	done < <(sudo find $mnt_name -name boot.oat -print)
+	AT_RES="good"
+
+}
+
 # this function is almost a dup of handle_simg
 # Ideally, handle_simg should call handle_ext4...
 # However, changing handle_simg may require some regression...
@@ -785,6 +867,7 @@ handle_ext4()
 
 handle_simg()
 {
+	echo "SIMG HANDLING A SPARSE: $img" 
 	local img="$1"
 	local nam=`basename -s .img "$img"`
 	local ext="$nam.ext4"
@@ -794,7 +877,17 @@ handle_simg()
 	mkdir $mnt_name
 	simg2img "$img" $DIR_TMP/"$ext"
 	# NOTE: needs sudo or root permission
-	sudo mount -o ro -t ext4 $DIR_TMP/"$ext" $mnt_name
+	echo "I GUESS HERE USERDATA FAILS"
+	if dump.erofs $DIR_TMP/"$ext"| grep -q "0xE0F5E1E2"; then
+		echo "Unsparsed image is erofs!"
+		sudo mount -o ro -t erofs $DIR_TMP/"$ext" $mnt_name
+	elif dump.f2fs $DIR_TMP/"$ext" | grep -q "checkpoint state"; then
+		echo "Unsparsed image is f2fs!"
+		sudo mount -o ro -t f2fs $DIR_TMP/"$ext" $mnt_name
+	else
+		echo "Fallback to default ext4!"
+		sudo mount -o ro -t ext4 $DIR_TMP/"$ext" $mnt_name
+	fi
 	# Find the boot.oat for RE odex
 	BOOT_OAT=""
 	BOOT_OAT_64=""
@@ -826,11 +919,18 @@ process_file()
 	if [ "$VENDOR" == "aosp" ]; then
 		if [ "$justname" == "system.img" ] || [ "$justname" == "system_other.img" ] || [ "$justname" == "vendor.img" ]; then
 			# Handle sparse ext4 fs image
-			echo "processing sparse ext4 img..."
-			echo "-----------------------------"
-			handle_simg "$filename"
-			echo "-----------------------------"
-			handled=true
+			if file $justname | grep -q "sparse image"; then
+				echo "processing sparse ext4 img..."
+				echo "-----------------------------"
+				handle_simg "$filename"
+				echo "-----------------------------"
+				handled=true
+			else 
+				echo "Not a sparse image, falling back to default ext4 unpacking"
+				echo "-----------------------------"
+				handle_ext4 "$filename"
+				echo "-----------------------------"
+			fi
 		elif [[ "$justname" == "radio"*".img" ]]; then
 			echo "processing vfat img"
 			echo "-----------------------------"
@@ -869,24 +969,61 @@ process_file()
 			fi
 			handled=true
 		elif [ "$justname" == "cache.img" ] || [ "$justname" == "hidden.img" ] || [ "$justname" == "omr.img" ] ||
-[ "$justname" == "hidden.img.md5" ] || [ "$justname" == "cache.img.md5" ] || [ "$justname" == "persist.img" ] || [ "$justname" == "factoryfs.img" ] || [ "$justname" == "vendor.img" ]; then
+[ "$justname" == "hidden.img.md5" ] || [ "$justname" == "cache.img.md5" ] || [ "$justname" == "persist.img" ] || [ "$justname" == "factoryfs.img" ] || [ "$justname" == "vendor.img" ] || 
+[ "$justname" == "vendor_a.img" ] || [ "$justname" == "odm.img" ]; then
 			# Handle sparse ext4 fs image
 			# note 2 firmware layout has different naming (.img) instead of (.img.ext4)
-			echo "processing sparse ext4 img..."
-			echo "-----------------------------"
-			handle_simg "$filename"
-			echo "-----------------------------"
-			handled=true
-		elif [ "$justname" == "system.img" ] || [ "$justname" == "userdata.img" ] ||
+			if file $justname | grep -q "sparse image"; then
+				echo "processing sparse ext4 img..."
+				echo "-----------------------------"
+				handle_simg "$filename"
+				echo "-----------------------------"
+				handled=true
+			elif dump.erofs $justname | grep -q "0xE0F5E1E2"; then
+				echo "processing erofs img..."
+				echo "-----------------------------"
+				handle_erofs "$filename"
+				echo "-----------------------------"
+				handled=true
+			elif dump.f2fs $justname | grep -q "checkpoint state"; then
+				echo "processing f2fs img..."
+				echo "-----------------------------"
+				handle_f2fs "$filename"
+				echo "-----------------------------"
+				handled=true
+			else 
+				echo "Not a sparse image, falling back to default ext4 unpacking"
+				echo "-----------------------------"
+				handle_ext4 "$filename"
+				echo "-----------------------------"
+			fi
+		elif [ "$justname" == "system.img" ] || [ "$justname" == "system_a.img" ] || [ "$justname" == "userdata.img" ] ||
 [ "$justname" == "system.img.md5" ] || [ "$justname" == "userdata.img.md5" ]; then
 			if [ "$samformat" == "DOS/MBR" ]; then
 				echo "processing vfat img"
 				echo "-----------------------------"
 				handle_vfat "$filename"
-			else
+			elif file $justname | grep -q "sparse image"; then
 				echo "processing sparse ext4 img..."
 				echo "-----------------------------"
 				handle_simg "$filename"
+			elif dump.erofs $justname | grep -q "0xE0F5E1E2"; then
+				echo "processing erofs img..."
+				echo "-----------------------------"
+				handle_erofs "$filename"
+				echo "-----------------------------"
+				handled=true
+			elif dump.f2fs $justname | grep -q "checkpoint state"; then
+				echo "processing f2fs img..."
+				echo "-----------------------------"
+				handle_f2fs "$filename"
+				echo "-----------------------------"
+				handled=true
+			else 
+				echo "Not a sparse image, falling back to default ext4 unpacking"
+				echo "-----------------------------"
+				handle_ext4 "$filename"
+				echo "-----------------------------"
 			fi
 			echo "-----------------------------"
 			handled=true
