@@ -196,7 +196,23 @@ def main_process(args, asp, aspc, file_contexts, primary_filesystem, android_ver
 
     determine_hardware(asp, primary_filesystem, init)
 
-    init.read_configs("/init.rc")
+    init_rc_candidates = [
+    "/init.rc",
+    "./system/etc/init/hw/init.rc"
+    ]
+
+    #init.read_configs("/init.rc")
+
+    for candidate in init_rc_candidates:
+        print("Candidate: ", candidate)
+        try:
+            init.read_configs(candidate)
+            print("Found init.rc at ", candidate)
+            break
+        except FileNotFoundError:
+            print(f"[WARN] Could not find init.rc at {candidate}")
+    else:
+        raise FileNotFoundError("init.rc not found in any known locations")
 
     if not args.skip_boot:
         init.boot_system()
@@ -221,6 +237,9 @@ def main_process(args, asp, aspc, file_contexts, primary_filesystem, android_ver
             sepolicy = asp.get_saved_file_path("precompiled_sepolicy")
 
         if not sepolicy:
+            print("I AM HERE")
+            for entry in asp.policy_files:
+                print(entry)
             log.error("No compiled sepolicy found. Cannot continue")
             return 1
 
